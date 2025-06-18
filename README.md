@@ -11,14 +11,5 @@ Follow these instructions to run the complete application with a user interface.
 2.  **Run the Backend:**
     *   Navigate to the backend folder: `cd backend`
     *   Install dependencies: `pip install -r requirements.txt`
-    *   run the app: `python app2.py`
+    *   run the app: `python app.py`
 
-
-### Running the Backend
-
-*   **Terminal 1 (Backend):**
-    ```bash
-    cd backend
-    python app.py
-    ```
-    The API will now be running on `http://localhost:8001`. You can send `POST` requests to the `/predict` endpoint.
