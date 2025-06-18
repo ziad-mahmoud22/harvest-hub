@@ -1,0 +1,34 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual Environments
+env/
+venv/
+.venv/
+
+# Node.js dependencies
+node_modules/
+
+# Dependency directories (Yarn)
+.pnp/
+.pnp.js
+
+# Build and distribution
+/dist
+/build
+
+# Log and database files
+*.log
+*.db
+*.sqlite3
+
+# IDE / Editor specific
+.vscode/
+.idea/
+
+# App-specific output folders (from your Flask app)
+/backend/uploads/
+/backend/outputs/

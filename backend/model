@@ -1,0 +1,10 @@
+from ultralytics import YOLO
+from PIL import Image
+import torch
+print(torch.__version__)
+model = YOLO('yolov11nripeness_150epoch.pt')
+results = model.predict('flask.jpg')
+
+# Show results
+results[0].show()  # Display image with bounding boxes
+print(results[0].boxes)  # Print detection information
