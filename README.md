@@ -1,5 +1,4 @@
 
-Follow these instructions to run the complete application with a user interface.
 
 ### Setup
 
