@@ -116,15 +116,26 @@ def process_image():
 
         processed_image_b64 = base64.b64encode(processed_image_bytes).decode('utf-8')
 
-        # Send the results to the Express server
-        response = requests.post(
-            'http://localhost:3000/results',
-            json={'image': processed_image_b64, 'text': text_output, 'image_path': input_image_path},
-            timeout=10
-        )
-        response.raise_for_status()
+    #     # Send the results to the Express server
+    #     response = requests.post(
+    #         'http://localhost:3000/results',
+    #         json={'image': processed_image_b64, 'text': text_output, 'image_path': input_image_path},
+    #         timeout=10
+    #     )
+    #     response.raise_for_status()
 
-        return jsonify(response.json()), response.status_code
+    #     return jsonify(response.json()), response.status_code
+    # except Exception as e:
+    #     print(f"Unexpected error: {e}")
+    #     traceback.print_exc()
+    #     return jsonify({'error': f'An unexpected error occurred: {e}'}), 500
+        return jsonify({
+                'status': 'success',
+                'message': 'Image processed successfully.',
+                'processed_image': processed_image_b64,
+                'results': json.loads(text_output) # Convert text back to a real JSON object
+            }), 200
+            
     except Exception as e:
         print(f"Unexpected error: {e}")
         traceback.print_exc()
