@@ -29,8 +29,8 @@ for model_name, model_path in MODEL_PATHS.items():
         models[model_name] = None
 
 # Ensure the upload and output folders exist
-UPLOAD_FOLDER = r'C:\Users\ziadm\Desktop\projects\gp\uploads'
-OUTPUT_FOLDER = r'C:\Users\ziadm\Desktop\projects\gp\outputs'
+UPLOAD_FOLDER = r'uploads'
+OUTPUT_FOLDER = r'outputs'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
@@ -132,7 +132,7 @@ def process_image():
         return jsonify({
                 'status': 'success',
                 'message': 'Image processed successfully.',
-                'processed_image': processed_image_b64,
+                # 'processed_image': processed_image_b64,
                 'results': json.loads(text_output) # Convert text back to a real JSON object
             }), 200
             
