@@ -15,8 +15,8 @@ app = Flask(__name__)
 CORS(app)  
 
 MODEL_PATHS = {
-    "ripeness": "yolov11nripeness_150epoch.pt",  # Model for ripeness detection
-    "tomato": "yolov11ntomato_200epoch.pt"  # Model for tomato detection
+    "ripeness": "models/yolov11nripeness_150epoch_v2.pt",  # Model for ripeness detection
+    "tomato": "models/yolov11ntomato_200epoch_v2.pt"  # Model for tomato detection
 }
 
 models = {}

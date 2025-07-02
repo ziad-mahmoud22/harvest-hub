@@ -393,4 +393,4 @@ if __name__ == "__main__":
     print(f" - Models: {list(models.keys())}")
     print(f" - Upload folder: {UPLOAD_FOLDER}")
     print(f" - Static folder: {STATIC_FOLDER}")
-    app.run(host="0.0.0.0", port=8001)
+    app.run(host="0.0.0.0", port=5000)

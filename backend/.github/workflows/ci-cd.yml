@@ -1,0 +1,87 @@
+name: CI‑CD Pipeline
+
+on:
+  push:
+    branches: [main]          # redeploys on every merge to main
+  pull_request:               # runs lint/tests on PRs
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+# ────────────────────────────────────────────────────────────
+jobs:
+  # 1. Quality gate ─ flake8 + pytest
+  lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r backend/requirements.txt
+          pip install flake8 pytest
+
+      - name: Lint
+        run: flake8 backend
+
+      - name: Unit tests
+        run: pytest
+
+  # 2. Build the Docker image and push to GitHub Container Registry
+  build-and-push:
+    needs: lint-test
+    runs-on: ubuntu-latest
+    permissions:            # allow pushing to GHCR
+      packages: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+  # 3. SSH into your running EC2 and restart the container
+  deploy-ec2:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}         # e.g. 18.222.x.x
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}       # your private .pem
+          script: |
+            # pull the freshly‑built image
+            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+
+            # stop & remove any previous container
+            docker stop ml || true
+            docker rm ml  || true
+
+            # run the new one, mounting your existing models folder
+            docker run -d --name ml \
+              -p 5000:5000 \
+              -v /home/ubuntu/backend/models:/backend/models:ro \
+              --restart=always \
+              ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
