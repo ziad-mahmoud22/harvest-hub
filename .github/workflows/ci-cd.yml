@@ -1,18 +1,19 @@
-name: Test ECR Push Only
+name: Production Deployment Pipeline
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [main, master]
 
 env:
-  AWS_REGION: eu-north-1  # Your ECR region
+  AWS_REGION: eu-north-1
   ECR_REPOSITORY: flask-backend
   IMAGE_TAG: ${{ github.sha }}
+  EC2_INSTANCE_ID: 'i-1234567890abcdef0'
+  EC2_SSH_USER: 'ubuntu'
 
 jobs:
-  deploy:
+  build-and-scan:
     runs-on: ubuntu-latest
-    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -20,20 +21,89 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-region: ${{ env.AWS_REGION }}  # Fixed: Use env var
+          aws-region: ${{ env.AWS_REGION }}
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
       - name: Login to Amazon ECR
-        id: login-ecr  # Added ID for output reference
+        id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
-        with:
-          region: ${{ env.AWS_REGION }}
 
-      - name: Build and push Docker image
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}  # Get registry URL from login step
+      - name: Build Docker image
         run: |
-          cd backend  # Navigate to your backend directory (where Dockerfile is)
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          cd backend
+          docker build \
+            --platform linux/amd64 \
+            -t ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }} \
+            -t ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest \
+            .
+
+      - name: Scan for vulnerabilities
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+          format: 'table'
+          exit-code: '1'
+          severity: 'CRITICAL'
+
+  deploy:
+    needs: build-and-scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Push to ECR
+        run: |
+          cd backend
+          docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+          docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to EC2
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          ssh -i ~/.ssh/id_rsa ${{ env.EC2_SSH_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
+          set -e
+          
+          # Pull new image
+          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
+          docker pull $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+          # Stop old container if exists
+          docker stop flask-app || true
+          docker rm flask-app || true
+
+          # Start new container
+          docker run -d \
+            --name flask-app \
+            --restart unless-stopped \
+            -p 5000:5000 \
+            -v /home/ubuntu/app_data:/app/data \
+            $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+          # Verify container is running
+          if ! docker ps | grep flask-app; then
+            echo "Container failed to start!"
+            exit 1
+          fi
+
+          # Run health check
+          sleep 5
+          curl -f http://localhost:5000/ || exit 1
+          EOF
