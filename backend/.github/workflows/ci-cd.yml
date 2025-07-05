@@ -1,87 +1,111 @@
-name: CI‑CD Pipeline
+name: Deploy Flask Backend to EC2 via ECR
 
 on:
   push:
-    branches: [main]          # redeploys on every merge to main
-  pull_request:               # runs lint/tests on PRs
-    branches: [main]
+    branches: [ main, master ]
+    paths:
+      - 'backend/**'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'backend/**'
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  ECR_REPOSITORY: flask-backend
+  IMAGE_TAG: ${{ github.sha }}
 
-# ────────────────────────────────────────────────────────────
 jobs:
-  # 1. Quality gate ─ flake8 + pytest
-  lint-test:
+  deploy:
     runs-on: ubuntu-latest
+    
     steps:
-      - uses: actions/checkout@v4
+    - name: Checkout code
+      uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: ${{ secrets.AWS_REGION }}
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-      - name: Install dependencies
-        run: |
-          pip install -r backend/requirements.txt
-          pip install flake8 pytest
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Lint
-        run: flake8 backend
+    - name: Check if ECR repository exists, create if not
+      run: |
+        aws ecr describe-repositories --repository-names $ECR_REPOSITORY --region ${{ secrets.AWS_REGION }} || \
+        aws ecr create-repository --repository-name $ECR_REPOSITORY --region ${{ secrets.AWS_REGION }}
 
-      - name: Unit tests
-        run: pytest
+    - name: Build, tag, and push image to Amazon ECR
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+      run: |
+        cd backend
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
-  # 2. Build the Docker image and push to GitHub Container Registry
-  build-and-push:
-    needs: lint-test
-    runs-on: ubuntu-latest
-    permissions:            # allow pushing to GHCR
-      packages: write
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
+    - name: Setup SSH key
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
 
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+    - name: Deploy to EC2
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+      run: |
+        ssh -i ~/.ssh/id_rsa ubuntu@${{ secrets.EC2_HOST }} "
+          # Configure AWS CLI on EC2 (if not already done)
+          aws configure set region ${{ secrets.AWS_REGION }}
+          
+          # Login to ECR
+          aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin $ECR_REGISTRY
+          
+          # Stop existing container
+          docker stop flask-backend || true
+          docker rm flask-backend || true
+          
+          # Pull latest image
+          docker pull $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          
+          # Create directories if they don't exist
+          mkdir -p ~/app/uploads ~/app/static
+          
+          # Run the container
+          docker run -d \
+            --name flask-backend \
+            --restart unless-stopped \
+            -p 5000:5000 \
+            -v ~/app/uploads:/app/uploads \
+            -v ~/app/static:/app/static \
+            -v ~/app/registered_devices.json:/app/registered_devices.json \
+            $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          
+          # Show container status
+          docker ps -a
+          
+          # Show logs
+          docker logs flask-backend --tail 20
+        "
 
-      - name: Build & push image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+    - name: Health check
+      run: |
+        sleep 15
+        ssh -i ~/.ssh/id_rsa ubuntu@${{ secrets.EC2_HOST }} "
+          curl -f http://localhost:5000/ || (docker logs flask-backend && exit 1)
+        "
 
-  # 3. SSH into your running EC2 and restart the container
-  deploy-ec2:
-    needs: build-and-push
-    runs-on: ubuntu-latest
-    steps:
-      - name: Deploy to EC2
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.EC2_HOST }}         # e.g. 18.222.x.x
-          username: ubuntu
-          key: ${{ secrets.EC2_SSH_KEY }}       # your private .pem
-          script: |
-            # pull the freshly‑built image
-            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-
-            # stop & remove any previous container
-            docker stop ml || true
-            docker rm ml  || true
-
-            # run the new one, mounting your existing models folder
-            docker run -d --name ml \
-              -p 5000:5000 \
-              -v /home/ubuntu/backend/models:/backend/models:ro \
-              --restart=always \
-              ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+    - name: Cleanup old Docker images
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+      run: |
+        ssh -i ~/.ssh/id_rsa ubuntu@${{ secrets.EC2_HOST }} "
+          # Remove old images but keep the latest ones
+          docker image prune -f
+          docker system prune -f
+        "
