@@ -1,0 +1,111 @@
+name: Deploy Flask Backend to EC2 via ECR
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'backend/**'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'backend/**'
+
+env:
+  ECR_REPOSITORY: flask-backend
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: ${{ secrets.AWS_REGION }}
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Check if ECR repository exists, create if not
+      run: |
+        aws ecr describe-repositories --repository-names $ECR_REPOSITORY --region ${{ secrets.AWS_REGION }} || \
+        aws ecr create-repository --repository-name $ECR_REPOSITORY --region ${{ secrets.AWS_REGION }}
+
+    - name: Build, tag, and push image to Amazon ECR
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+      run: |
+        cd backend
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+    - name: Setup SSH key
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+
+    - name: Deploy to EC2
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+      run: |
+        ssh -i ~/.ssh/id_rsa ubuntu@${{ secrets.EC2_HOST }} "
+          # Configure AWS CLI on EC2 (if not already done)
+          aws configure set region ${{ secrets.AWS_REGION }}
+          
+          # Login to ECR
+          aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin $ECR_REGISTRY
+          
+          # Stop existing container
+          docker stop flask-backend || true
+          docker rm flask-backend || true
+          
+          # Pull latest image
+          docker pull $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          
+          # Create directories if they don't exist
+          mkdir -p ~/app/uploads ~/app/static
+          
+          # Run the container
+          docker run -d \
+            --name flask-backend \
+            --restart unless-stopped \
+            -p 5000:5000 \
+            -v ~/app/uploads:/app/uploads \
+            -v ~/app/static:/app/static \
+            -v ~/app/registered_devices.json:/app/registered_devices.json \
+            $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          
+          # Show container status
+          docker ps -a
+          
+          # Show logs
+          docker logs flask-backend --tail 20
+        "
+
+    - name: Health check
+      run: |
+        sleep 15
+        ssh -i ~/.ssh/id_rsa ubuntu@${{ secrets.EC2_HOST }} "
+          curl -f http://localhost:5000/ || (docker logs flask-backend && exit 1)
+        "
+
+    - name: Cleanup old Docker images
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+      run: |
+        ssh -i ~/.ssh/id_rsa ubuntu@${{ secrets.EC2_HOST }} "
+          # Remove old images but keep the latest ones
+          docker image prune -f
+          docker system prune -f
+        "
