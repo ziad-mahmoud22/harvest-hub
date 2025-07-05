@@ -12,7 +12,7 @@ env:
   EC2_SSH_USER: 'ubuntu'
 
 jobs:
-  build-and-scan:
+  build-scan-and-deploy:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -29,44 +29,38 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Check if ECR repository exists, create if not
+        run: |
+          aws ecr describe-repositories --repository-names ${{ env.ECR_REPOSITORY }} --region ${{ env.AWS_REGION }} || \
+          aws ecr create-repository --repository-name ${{ env.ECR_REPOSITORY }} --region ${{ env.AWS_REGION }}
+
       - name: Build Docker image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
           cd backend
           docker build \
             --platform linux/amd64 \
-            -t ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }} \
-            -t ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest \
+            -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }} \
+            -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest \
             .
 
       - name: Scan for vulnerabilities
         uses: aquasecurity/trivy-action@master
-        continue-on-error: true  # Optional
+        continue-on-error: true
         with:
           image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
           format: 'table'
-          severity: 'CRITICAL,HIGH'  # Check both
-          ignore-unfixed: true  # Skip unpatched issues
-          exit-code: '0'  # Never fail the pipeline
-
-  deploy:
-    needs: build-and-scan
-    runs-on: ubuntu-latest
-    steps:
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-region: ${{ env.AWS_REGION }}
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
+          severity: 'CRITICAL,HIGH'
+          ignore-unfixed: true
+          exit-code: '0'
 
       - name: Push to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
-          docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
-          docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+          docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest
 
       - name: Setup SSH
         run: |
@@ -82,29 +76,56 @@ jobs:
           ssh -i ~/.ssh/id_rsa ${{ env.EC2_SSH_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
           set -e
           
-          # Pull new image
-          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
-          docker pull $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-
-          # Stop old container if exists
+          # Configure AWS CLI on EC2 (if not already done)
+          aws configure set region ${{ env.AWS_REGION }}
+          
+          # Login to ECR
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}
+          
+          # Stop existing container
           docker stop flask-app || true
           docker rm flask-app || true
-
+          
+          # Pull new image
+          docker pull ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+          
+          # Create directories if they don't exist
+          mkdir -p ~/app/uploads ~/app/static ~/app/data
+          
           # Start new container
           docker run -d \
             --name flask-app \
             --restart unless-stopped \
             -p 5000:5000 \
-            -v /home/ubuntu/app_data:/app/data \
-            $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+            -v ~/app/uploads:/app/uploads \
+            -v ~/app/static:/app/static \
+            -v ~/app/data:/app/data \
+            -v ~/app/registered_devices.json:/app/registered_devices.json \
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
 
           # Verify container is running
           if ! docker ps | grep flask-app; then
             echo "Container failed to start!"
+            docker logs flask-app || true
             exit 1
           fi
 
-          # Run health check
-          sleep 5
-          curl -f http://localhost:5000/ || exit 1
+          # Show container status
+          docker ps -a
+          docker logs flask-app --tail 10
           EOF
+
+      - name: Health check
+        run: |
+          sleep 15
+          ssh -i ~/.ssh/id_rsa ${{ env.EC2_SSH_USER }}@${{ secrets.EC2_HOST }} "
+            curl -f http://localhost:5000/ || (docker logs flask-app && exit 1)
+          "
+
+      - name: Cleanup old Docker images on EC2
+        run: |
+          ssh -i ~/.ssh/id_rsa ${{ env.EC2_SSH_USER }}@${{ secrets.EC2_HOST }} "
+            # Remove old images but keep the latest ones
+            docker image prune -f
+            docker system prune -f
+          "
