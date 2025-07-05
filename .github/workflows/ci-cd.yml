@@ -5,6 +5,7 @@ on:
     branches: [ main, master ]
 
 env:
+  AWS_REGION: eu-north-1  # Your ECR region
   ECR_REPOSITORY: flask-backend
   IMAGE_TAG: ${{ github.sha }}
 
@@ -19,18 +20,20 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region: ${{ env.AWS_REGION }}  # Fixed: Use env var
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
       - name: Login to Amazon ECR
-        id: login-ecr
+        id: login-ecr  # Added ID for output reference
         uses: aws-actions/amazon-ecr-login@v2
+        with:
+          region: ${{ env.AWS_REGION }}
 
-      - name: Build and Push to ECR
+      - name: Build and push Docker image
         env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}  # Get registry URL from login step
         run: |
-          cd backend
+          cd backend  # Navigate to your backend directory (where Dockerfile is)
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
