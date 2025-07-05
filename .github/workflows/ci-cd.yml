@@ -8,6 +8,7 @@ env:
   AWS_REGION: eu-north-1
   ECR_REPOSITORY: flask-backend
   IMAGE_TAG: ${{ github.sha }}
+  EC2_INSTANCE_ID: 'i-1234567890abcdef0'
   EC2_SSH_USER: 'ubuntu'
 
 jobs:
@@ -30,20 +31,22 @@ jobs:
 
       - name: Build Docker image
         run: |
+          cd backend
           docker build \
             --platform linux/amd64 \
             -t ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }} \
-            -f backend/Dockerfile \  # 👈 Explicit Dockerfile path
+            -t ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest \
             .
 
       - name: Scan for vulnerabilities
         uses: aquasecurity/trivy-action@master
-        continue-on-error: true
+        continue-on-error: true  # Optional
         with:
           image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
           format: 'table'
-          severity: 'CRITICAL'
-          ignore-unfixed: true
+          severity: 'CRITICAL,HIGH'  # Check both
+          ignore-unfixed: true  # Skip unpatched issues
+          exit-code: '0'  # Never fail the pipeline
 
   deploy:
     needs: build-and-scan
@@ -63,6 +66,7 @@ jobs:
       - name: Push to ECR
         run: |
           docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+          docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
 
       - name: Setup SSH
         run: |
@@ -76,18 +80,31 @@ jobs:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
           ssh -i ~/.ssh/id_rsa ${{ env.EC2_SSH_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
-          set -ex
+          set -e
+          
+          # Pull new image
           aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
           docker pull $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+          # Stop old container if exists
           docker stop flask-app || true
           docker rm flask-app || true
+
+          # Start new container
           docker run -d \
             --name flask-app \
             --restart unless-stopped \
             -p 5000:5000 \
             -v /home/ubuntu/app_data:/app/data \
             $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          docker ps | grep flask-app || exit 1
+
+          # Verify container is running
+          if ! docker ps | grep flask-app; then
+            echo "Container failed to start!"
+            exit 1
+          fi
+
+          # Run health check
           sleep 5
-          curl -f http://localhost:5000 || exit 1
+          curl -f http://localhost:5000/ || exit 1
           EOF
