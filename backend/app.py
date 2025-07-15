@@ -15,7 +15,7 @@ if 'torch' in globals():
     
 matplotlib.use(
     "Agg"
-)  # Use a non-interactive backend for Matplotlib in a server environment
+) 
 import matplotlib.pyplot as plt
 import threading
 from collections import defaultdict
@@ -23,18 +23,15 @@ import io
 from threading import Lock
 
 app = Flask(__name__)
-# Moved app_start_time to global scope for production server compatibility
 app_start_time = time.time()
 CORS(app)
-app.static_folder = "static"  # Explicitly serve static files
+app.static_folder = "static"  
 
-# === Secret Key for Cleanup ===
 CLEANUP_API_KEY = "u75rxkreJ7oHpr"
 
-# === YOLO Models ===
 MODEL_PATHS = {
-    "ripeness": "yolov11nripeness_150epoch.pt",  # Model for ripeness detection
-    "tomato": "yolov11ntomato_200epoch.pt"  # Model for tomato detection
+    "ripeness": "yolov11nripeness_150epoch.pt",
+    "tomato": "yolov11ntomato_200epoch.pt"
 }
 
 disease_list = [
@@ -64,21 +61,17 @@ REGISTERED_DEVICES_FILE = "registered_devices.json"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(STATIC_FOLDER, exist_ok=True)
 
-# === Registry and Logs (Thread-Safe) ===
-# Add a lock for thread-safe access to shared data
 registry_lock = Lock()
 device_registry = {}
 zone_devices = defaultdict(list)
 zone_disease_count = defaultdict(int)
 
-# === Persistent Device Storage Functions ===
 def load_registered_devices():
-    """Load registered devices from JSON file"""
     try:
         if os.path.exists(REGISTERED_DEVICES_FILE):
             with open(REGISTERED_DEVICES_FILE, 'r') as f:
                 data = json.load(f)
-                # Convert back to proper format
+                
                 global device_registry, zone_devices
                 device_registry = data.get('device_registry', {})
                 zone_devices_dict = data.get('zone_devices', {})
@@ -92,70 +85,79 @@ def load_registered_devices():
     return False
 
 def save_registered_devices():
-    """Save registered devices to JSON file"""
     try:
         data = {
             'device_registry': device_registry,
-            'zone_devices': dict(zone_devices)  # Convert defaultdict to regular dict
-        }
+            'zone_devices': dict(zone_devices)         }
         with open(REGISTERED_DEVICES_FILE, 'w') as f:
             json.dump(data, f, indent=4)
         print(f"💾 Saved {len(device_registry)} registered devices to file")
     except Exception as e:
         print(f"❌ Error saving registered devices: {e}")
 
-# Load existing registered devices on startup
 load_registered_devices()
 
-# =================================================================
-# Background Cleanup Task
-# =================================================================
+
 def cleanup_devices():
-    """Periodically remove inactive devices (every 5 minutes)"""
     while True:
-        time.sleep(300)  # 5 minutes
+        time.sleep(300)
         now = time.time()
         expired_devices_info = []
 
-        # Use the lock to safely identify expired devices
         with registry_lock:
             for device_id, device in device_registry.items():
-                if now - device["last_seen"] > 600:  # 10 minute timeout
+                if now - device["last_seen"] > 600:
                     expired_devices_info.append(
                         {"id": device_id, "zone": device["zone"]}
                     )
 
-        # Perform deletions outside the initial lock to keep the lock duration short
         for device_info in expired_devices_info:
             device_id = device_info["id"]
             zone = device_info["zone"]
-            # Use the lock again for the modification part
             with registry_lock:
                 if (
                     device_id in device_registry
-                ):  # Check if it wasn't re-registered in the meantime
+                ):
                     del device_registry[device_id]
                     if device_id in zone_devices[zone]:
                         zone_devices[zone].remove(device_id)
                     print(f"🧹 Removed expired device: {device_id} from zone: {zone}")
-                    # Save changes to file
+                    
                     save_registered_devices()
 
 cleanup_thread = threading.Thread(target=cleanup_devices, daemon=True)
 cleanup_thread.start()
 
-# =================================================================
-# Helper Functions
-# =================================================================
+@app.route("/register", methods=["POST"])
+def register_device():
+    data = request.get_json()
+    if not data or not all(k in data for k in ["device_id", "ip", "zone"]):
+        return jsonify({"error": "Missing device_id, ip, or zone"}), 400
+
+    device_id, ip, zone = data["device_id"], data["ip"], data["zone"]
+
+    with registry_lock:
+        if device_id in device_registry:
+            old_zone = device_registry[device_id]["zone"]
+            if old_zone != zone and device_id in zone_devices[old_zone]:
+                zone_devices[old_zone].remove(device_id)
+
+        device_registry[device_id] = {"ip": ip, "zone": zone, "last_seen": time.time()}
+        if device_id not in zone_devices[zone]:
+            zone_devices[zone].append(device_id)
+
+    save_registered_devices()
+
+    print(f"📱 Registered device: {device_id} in zone: {zone} (IP: {ip})")
+    return jsonify({"status": "registered"}), 200
+
 def notify_neighbor(ip):
-    """Send notification to neighbor device in a non-blocking way"""
     try:
         requests.post(f"http://{ip}:9000", data="TAKE_PHOTO", timeout=1)
     except Exception as e:
         print(f"⚠️ Neighbor notification failed to {ip}: {str(e)}")
 
 def process_image_with_model(image_path, model_name):
-    """Process image and return both detailed detections and simple count format"""
     if model_name not in models or not models[model_name]:
         return None, None, f"Model '{model_name}' not loaded"
     try:
@@ -167,7 +169,6 @@ def process_image_with_model(image_path, model_name):
         output_path = os.path.join(STATIC_FOLDER, output_filename)
         im.save(output_path)
 
-        # Detailed detections for internal use
         detections = []
         for box in r.boxes:
             cls = int(box.cls.item())
@@ -176,7 +177,6 @@ def process_image_with_model(image_path, model_name):
             bbox = box.xyxy[0].tolist()
             detections.append({"class": name, "confidence": conf, "bbox": bbox})
 
-        # Simple count format for results output
         classes = r.boxes.cls.tolist()
         class_counts = {}
         names = models[model_name].names
@@ -189,34 +189,6 @@ def process_image_with_model(image_path, model_name):
         traceback.print_exc()
         return None, None, str(e)
 
-# =================================================================
-# API Endpoints
-# =================================================================
-@app.route("/register", methods=["POST"])
-def register_device():
-    data = request.get_json()
-    if not data or not all(k in data for k in ["device_id", "ip", "zone"]):
-        return jsonify({"error": "Missing device_id, ip, or zone"}), 400
-
-    device_id, ip, zone = data["device_id"], data["ip"], data["zone"]
-
-    # Use lock for all modifications to shared registries
-    with registry_lock:
-        if device_id in device_registry:
-            old_zone = device_registry[device_id]["zone"]
-            if old_zone != zone and device_id in zone_devices[old_zone]:
-                zone_devices[old_zone].remove(device_id)
-
-        device_registry[device_id] = {"ip": ip, "zone": zone, "last_seen": time.time()}
-        if device_id not in zone_devices[zone]:  # Avoid duplicates
-            zone_devices[zone].append(device_id)
-
-    # Save to file after registration
-    save_registered_devices()
-
-    print(f"📱 Registered device: {device_id} in zone: {zone} (IP: {ip})")
-    return jsonify({"status": "registered"}), 200
-
 @app.route("/predict", methods=["POST"])
 def predict_image():
     if "image" not in request.files:
@@ -226,9 +198,7 @@ def predict_image():
 
     model_name = request.form.get("model_name", "ripeness")
     device_id = request.form.get("device_id")
-    # Handle sensor_value sent from ESP32
     sensor_value = request.form.get("sensor_value")
-    # Better IP handling for production environments behind a proxy
     client_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
 
     if model_name not in models:
@@ -236,22 +206,19 @@ def predict_image():
 
     command = "OK"
     detections = []
-    results = {}  # Simple count format
+    results = {}
     image_filename = None
     neighbors_to_notify = []
 
     try:
-        # Use lock for all reads/writes to shared registries
         with registry_lock:
             if device_id not in device_registry:
                 command = "REGISTER_AGAIN"
             else:
-                # Update device status
                 device_registry[device_id]["ip"] = client_ip
                 device_registry[device_id]["last_seen"] = time.time()
                 zone = device_registry[device_id]["zone"]
 
-                # Process image
                 image_file = request.files["image"]
                 input_path = os.path.join(UPLOAD_FOLDER, f"{uuid.uuid4()}.jpg")
                 image_file.save(input_path)
@@ -262,7 +229,6 @@ def predict_image():
                 if image_filename is None:
                     return jsonify({"error": str(results)}), 500
 
-                # Store latest prediction for this device
                 device_predictions[device_id] = {
                     "timestamp": time.time(),
                     "image_filename": image_filename,
@@ -270,7 +236,6 @@ def predict_image():
                     "detections": detections
                 }
 
-                # Analyze detections and update zone counts
                 disease_score = sum(
                     1
                     for det in detections
@@ -282,27 +247,23 @@ def predict_image():
                         f"🚨 Disease detected in zone {zone} by {device_id} (Score: {disease_score})"
                     )
 
-                    # Get list of neighbors to notify
                     for neighbor_id in zone_devices.get(zone, []):
                         if neighbor_id != device_id and neighbor_id in device_registry:
                             neighbors_to_notify.append(
                                 device_registry[neighbor_id]["ip"]
                             )
 
-        # Notify neighbors outside the lock to avoid blocking other requests
         for neighbor_ip in neighbors_to_notify:
             threading.Thread(target=notify_neighbor, args=(neighbor_ip,)).start()
 
-        # Log sensor value if present
         if sensor_value:
             print(f"📊 Received sensor value from {device_id}: {sensor_value}")
 
-        # Return in the simple format you requested
         return jsonify(
             {
                 "status": "success",
                 "device_id": device_id,
-                "results": results,  # Simple format: {"Strawberry_ripe": 4, "Strawberry_unripe": 3}
+                "results": results,
                 "image_url": f"/static/{image_filename}" if image_filename else None,
                 "command": command,
             }
@@ -314,7 +275,6 @@ def predict_image():
 
 @app.route("/devices", methods=["GET"])
 def get_registered_devices():
-    """Get all registered devices from file"""
     with registry_lock:
         return jsonify({
             'status': 'success',
@@ -324,10 +284,8 @@ def get_registered_devices():
 
 @app.route("/generate_heatmap", methods=["GET"])
 def generate_heatmap():
-    """Generate heatmap in-memory and return directly."""
     try:
         with registry_lock:
-            # Make a copy to work with, releasing the lock quickly
             local_counts = dict(zone_disease_count)
 
         if not local_counts:
@@ -342,11 +300,10 @@ def generate_heatmap():
         ax.set_ylabel("Disease Count")
         ax.set_title("Disease Distribution by Zone")
 
-        # Save to a memory buffer
         buf = io.BytesIO()
         fig.savefig(buf, format="png", bbox_inches="tight")
         buf.seek(0)
-        plt.close(fig)  # Important to free memory
+        plt.close(fig)
 
         return send_file(buf, mimetype="image/png")
 
@@ -356,32 +313,24 @@ def generate_heatmap():
 
 @app.route("/cleanup", methods=["POST"])
 def cleanup_server_state():
-    """
-    Resets all in-memory data and deletes generated image files.
-    Requires a valid API key in the 'X-API-KEY' header.
-    """
     auth_key = request.headers.get("X-API-KEY")
     if auth_key != CLEANUP_API_KEY:
         return jsonify({"error": "Unauthorized: Invalid or missing API key"}), 403
 
     try:
-        # 1. Clear in-memory data (thread-safe)
         with registry_lock:
             cleared_devices_count = len(device_registry)
             device_registry.clear()
             zone_devices.clear()
             zone_disease_count.clear()
 
-        # 2. Delete the persistent file
         if os.path.exists(REGISTERED_DEVICES_FILE):
             os.remove(REGISTERED_DEVICES_FILE)
 
-        # 3. Delete generated files from 'uploads' and 'static'
         deleted_files_count = 0
         deletion_errors = []
         for folder in [UPLOAD_FOLDER, STATIC_FOLDER]:
             for filename in os.listdir(folder):
-                # Only delete image files, leave other files (like models) alone
                 if filename.lower().endswith((".jpg", ".png", ".jpeg")):
                     try:
                         file_path = os.path.join(folder, filename)
@@ -392,7 +341,6 @@ def cleanup_server_state():
                         deletion_errors.append(error_msg)
                         print(f"⚠️ {error_msg}")
 
-        # 4. Construct and send the response
         response_data = {
             "status": "success",
             "message": "Server state and generated files have been cleared.",
@@ -414,15 +362,10 @@ def cleanup_server_state():
             {"error": f"An unexpected error occurred during cleanup: {str(e)}"}
         ), 500
 
-# Store latest predictions for each device
 device_predictions = {}
 
 @app.route("/latest/<device_id>", methods=["GET"])
 def get_latest_prediction(device_id):
-    """
-    Get the latest prediction for a specific device.
-    Returns photo and disease/ripeness counts in React-friendly format.
-    """
     try:
         with registry_lock:
             if device_id not in device_registry:
@@ -434,7 +377,6 @@ def get_latest_prediction(device_id):
             prediction = device_predictions[device_id]
             device_info = device_registry[device_id]
             
-            # Format response for React frontend
             response_data = {
                 "device_id": device_id,
                 "zone": device_info["zone"],
@@ -455,10 +397,6 @@ def get_latest_prediction(device_id):
 
 @app.route("/all_latest", methods=["GET"])
 def get_all_latest_predictions():
-    """
-    Get latest predictions for all devices.
-    Perfect for React dashboard showing all device statuses.
-    """
     try:
         with registry_lock:
             all_predictions = []
@@ -472,7 +410,6 @@ def get_all_latest_predictions():
                     "status": "online" if time.time() - device_info["last_seen"] < 600 else "offline"
                 }
                 
-                # Add prediction data if available
                 if device_id in device_predictions:
                     prediction = device_predictions[device_id]
                     device_data.update({
@@ -511,7 +448,6 @@ def get_all_latest_predictions():
 
 @app.route("/stats", methods=["GET"])
 def get_stats():
-    # Use lock to get a consistent snapshot of the stats
     with registry_lock:
         stats = {
             "device_count": len(device_registry),
